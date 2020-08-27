@@ -29,20 +29,17 @@
 
 import {createLogger} from '@natlibfi/melinda-backend-commons';
 import createStateInterface, {statuses} from '@natlibfi/melinda-record-harvest-commons';
-import finalizeProcessingFactory from './finalize-processing';
 import processRecordsFactory from './process-records';
 
-export default async ({dumpDirectory, logLevel, maxFileSize, stateInterfaceOptions}) => {
+export default async ({logLevel, stateInterfaceOptions, matchOptions}) => {
   const logger = createLogger(logLevel);
 
-  logger.log('info', `Starting melinda-record-dump-exporter`);
+  logger.log('info', `Starting melinda-record-matching-finder`);
 
-  const {readState, getPool, close, writeState} = await createStateInterface(stateInterfaceOptions);
+  const {readState, writeState, getPool, close} = await createStateInterface(stateInterfaceOptions);
   const {status} = await readState();
-
   const dbPool = getPool();
-  const processRecords = processRecordsFactory({logger, maxFileSize, dbPool});
-  const finalizeProcessing = finalizeProcessingFactory({logger, dumpDirectory, dbPool, writeState});
+  const processRecords = processRecordsFactory({logger, dbPool, matchOptions});
 
   await initializeDatabase();
 
@@ -65,9 +62,14 @@ export default async ({dumpDirectory, logLevel, maxFileSize, stateInterfaceOptio
   logger.info('Nothing to do. Exiting.');
   return close();
 
+  async function finalizeProcessing() {
+    await writeState({status: statuses.postProcessingDone});
+  }
+
   async function initializeDatabase() {
     const connection = await dbPool.getConnection();
-    await connection.query(`CREATE TABLE IF NOT EXISTS packages (id MEDIUMINT NOT NULL AUTO_INCREMENT, data LONGBLOB NOT NULL, PRIMARY KEY (id))`);
+    await connection.query(`CREATE TABLE IF NOT EXISTS results_records (id MEDIUMINT NOT NULL UNIQUE, record JSON NOT NULL, PRIMARY KEY (id))`);
+    await connection.query(`CREATE TABLE IF NOT EXISTS results_matches (id MEDIUMINT NOT NULL, probability FLOAT NOT NULL, match_result JSON NOT NULL)`);
     await connection.end();
   }
 };

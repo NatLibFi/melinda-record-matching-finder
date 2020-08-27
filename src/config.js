@@ -27,11 +27,30 @@
 */
 
 import {readEnvironmentVariable} from '@natlibfi/melinda-backend-commons';
+import {candidateSearch, matchDetection} from '@natlibfi/melinda-record-matching';
+
+const recordType = readEnvironmentVariable('RECORD_TYPE');
+
+const bibSearchSpec = [
+  candidateSearch.searchTypes.bib.hostComponents,
+  candidateSearch.searchTypes.bib.standardIdentifiers,
+  candidateSearch.searchTypes.bib.title
+];
+
+const bibStrategy = [
+  matchDetection.features.bib.hostComponent(),
+  matchDetection.features.bib.isbn(),
+  matchDetection.features.bib.issn(),
+  matchDetection.features.bib.otherStandardIdentifier(),
+  matchDetection.features.bib.title(),
+  matchDetection.features.bib.authors(),
+  matchDetection.features.bib.recordType(),
+  matchDetection.features.bib.publicationTime(),
+  matchDetection.features.bib.language(),
+  matchDetection.features.bib.bibliographicLevel()
+];
 
 export const logLevel = readEnvironmentVariable('LOG_LEVEL', {defaultValue: 'info'});
-export const dumpDirectory = readEnvironmentVariable('DUMP_DIRECTORY', {defaultValue: 'dump'});
-// 10 megabytes
-export const maxFileSize = readEnvironmentVariable('MAX_FILE_SIZE', {defaultValue: 10000000, format: v => Number(v)});
 
 export const stateInterfaceOptions = {
   db: {
@@ -41,5 +60,18 @@ export const stateInterfaceOptions = {
     database: readEnvironmentVariable('DATABASE_NAME'),
     username: readEnvironmentVariable('DATABASE_USERNAME'),
     password: readEnvironmentVariable('DATABASE_PASSWORD')
+  }
+};
+
+export const matchOptions = {
+  maxMatches: readEnvironmentVariable('MAX_MATCHES', {defaultValue: 1, format: v => Number(v)}),
+  maxCandidates: readEnvironmentVariable('MAX_CANDIDATES', {defaultValue: 25, format: v => Number(v)}),
+  search: {
+    url: readEnvironmentVariable('SRU_URL'),
+    searchSpec: recordType === 'bib' ? bibSearchSpec : []
+  },
+  detection: {
+    treshold: readEnvironmentVariable('MATCHING_TRESHOLD', {defaultValue: 0.9, format: v => Number(v)}),
+    strategy: recordType === 'bib' ? bibStrategy : []
   }
 };

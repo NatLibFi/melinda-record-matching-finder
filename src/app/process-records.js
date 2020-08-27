@@ -27,105 +27,113 @@
 *
 */
 
-import {zip} from 'compressing';
-import {MARCXML} from '@natlibfi/marc-record-serializers';
+import createMatchInterface, {candidateSearch} from '@natlibfi/melinda-record-matching';
 import {MarcRecord} from '@natlibfi/marc-record';
 
-export default ({logger, dbPool, maxFileSize}) => {
+export default ({logger, dbPool, matchOptions}) => {
+  const match = createMatchInterface(matchOptions);
+
   return processRecords;
 
-  async function processRecords(harvestDone = false) {
+  async function processRecords(cursor) {
     const connection = await dbPool.getConnection();
-    await connection.beginTransaction();
 
-    logger.log('info', 'Finding records to package...');
-    const identifiers = await packageRecords();
+    logger.log('debug', cursor ? `Fetching records from the database with cursor ${cursor}` : 'Fetching records from the database');
 
-    if (identifiers) {
-      logger.log('info', identifiers.length === 0 ? 'No records to package' : `Created package with ${identifiers.length} records`);
+    const {newCursor, records} = await getRecords();
 
-      await removeRecords();
-
-      await connection.commit();
+    if (newCursor) {
+      await findMatches(records);
       await connection.end();
-
-      return processRecords();
+      return processRecords(newCursor);
     }
 
-    logger.log('info', 'Harvesting pending and not enough records yet available for a package.');
+    if (records.length > 0) {
+      await findMatches(records);
+      await connection.end();
+      return;
+    }
 
-    await connection.rollback();
     await connection.end();
 
-    async function packageRecords() {
-      const compressStream = new zip.Stream();
-      const identifiers = await addRecords();
-
-      if (identifiers && identifiers.length > 0) {
-        await insertPackage();
-        return identifiers;
+    async function getRecords() {
+      if (cursor) {
+        const results = await connection.query('SELECT * FROM records WHERE id > ? ORDER BY id ASC LIMIT 1000', [cursor]);
+        return format(results);
       }
 
-      function insertPackage() {
-        return new Promise((resolve, reject) => {
-          const stream = compressStream.on('error', reject);
-          logger.log('debug', 'Inserting package into database');
-          resolve(connection.query('INSERT INTO packages (data) VALUE (?)', stream));
-        });
-      }
+      const results = await connection.query('SELECT * FROM records ORDER BY id ASC LIMIT 1000');
+      return format(results);
 
-      function addRecords() {
-        return new Promise((resolve, reject) => {
-          const identifiers = [];
-          let size = 0; // eslint-disable-line functional/no-let
+      function format(results) {
+        if (results.length < 1000) {
+          return {
+            records: results.map(formatRecord)
+          };
+        }
 
-          const emitter = connection.queryStream('SELECT * FROM records');
+        return {
+          records: results.map(formatRecord),
+          newCursor: results.slice(-1)[0].id
+        };
 
-          emitter
-            .on('error', reject)
-            .on('end', () => {
-              if (harvestDone) {
-                resolve(identifiers);
-                return;
-              }
-
-              resolve();
-            })
-            .on('data', async ({id, record}) => {
-              try {
-                const recordBuffer = await convertRecord(record);
-
-                if (size + recordBuffer.length > maxFileSize) {
-                // this message is repeated: destroy doesn't work?
-                  logger.log('debug', 'Maximum file size reached');
-                  emitter.destroy();
-                  resolve(identifiers);
-                  return;
-                }
-
-                const prefix = id.toString().padStart('0', 9);
-
-                compressStream.addEntry(recordBuffer, {relativePath: `${prefix}.xml`});
-                identifiers.push(id); // eslint-disable-line functional/immutable-data
-
-                size += recordBuffer.length;
-              } catch (err) {
-                reject(new Error(`Converting record ${id} to MARCXML failed: ${err}`));
-              }
-
-              async function convertRecord(record) {
-              // Disable validation because we just to want harvest everything and not comment on validity
-                const marcRecord = new MarcRecord(record, {fields: false, subfields: false, subfieldValues: false});
-                const str = await MARCXML.to(marcRecord, {indent: true});
-                return Buffer.from(str);
-              }
-            });
-        });
+        function formatRecord({id, record}) {
+          return {
+            id,
+            record: new MarcRecord(record, {fields: false, subfields: false, subfieldValues: false})
+          };
+        }
       }
     }
 
-    async function removeRecords() {
-      await connection.batch('DELETE FROM records WHERE id=?', identifiers.map(i => [i]));
+    async function findMatches(records) {
+      const [recordResult] = records;
+
+      if (recordResult) { // eslint-disable-line functional/no-conditional-statement
+        const {id, record} = recordResult;
+
+        logger.log('debug', `Finding matches for record ${id}`);
+
+        try {
+          await connection.beginTransaction();
+
+          const matchResults = await match(record);
+
+          if (matchResults.length > 0) {
+            logger.log('info', `Matches found for record ${id}`);
+
+            await connection.query('INSERT INTO results_records VALUES(?,?)', [id, record.toObject()]);
+            await insertResults(id, matchResults);
+            await connection.query('DELETE FROM records WHERE id = ?', [id]);
+            await connection.commit();
+            return findMatches(records.slice(1));
+          }
+
+          await connection.query('DELETE FROM records WHERE id = ?', [id]);
+          await connection.commit();
+          return findMatches(records.slice(1));
+        } catch (err) {
+          if (err instanceof candidateSearch.CandidateSearchError) {
+            logger.log('warn', `Skipping record ${id}: ${err.message}`);
+            await connection.query('DELETE FROM records WHERE id = ?', [id]);
+            await connection.commit();
+            return findMatches(records.slice(1));
+          }
+
+          await connection.rollback();
+          throw err;
+        }
+      }
+
+      async function insertResults(id, matches) {
+        const [match] = matches;
+
+        if (match) {
+          const {candidate, probability} = match;
+          await connection.query('INSERT INTO results_matches VALUES(?,?,?)', [id, probability, candidate.toObject()]);
+          return insertResults(id, matches.slice(1));
+        }
+      }
     }
   }
 };
