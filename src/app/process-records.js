@@ -104,9 +104,20 @@ export default ({logger, dbPool, matchOptions}) => {
         const [match] = matches;
 
         if (match) {
-          const {candidate, probability} = match;
-          await connection.query('INSERT INTO results_matches VALUES(?,?,?)', [id, probability, candidate.toObject()]);
+          const {candidate, probability} = formatResult();
+          await connection.query('INSERT INTO results_matches VALUES(?,?,?)', [id, probability, candidate]);
           return insertResults(id, matches.slice(1));
+        }
+
+        function formatResult() {
+          const {candidate, probability} = match;
+          return {
+            probability,
+            candidate: {
+              id: candidate.id,
+              record: candidate.record.toObject()
+            }
+          };
         }
       }
     }
