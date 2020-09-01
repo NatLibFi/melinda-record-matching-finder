@@ -35,54 +35,29 @@ export default ({logger, dbPool, matchOptions}) => {
 
   return processRecords;
 
-  async function processRecords(cursor) {
+  async function processRecords() {
+    const maxRecordsPerQuery = 1000;
     const connection = await dbPool.getConnection();
 
-    logger.log('debug', cursor ? `Fetching records from the database with cursor ${cursor}` : 'Fetching records from the database');
+    logger.log('debug', 'Fetching records from the database');
 
-    const {newCursor, records} = await getRecords();
-
-    if (newCursor) {
-      await findMatches(records);
-      await connection.end();
-      return processRecords(newCursor);
-    }
+    const records = await getRecords();
+    await connection.end();
 
     if (records.length > 0) {
       await findMatches(records);
-      await connection.end();
-      return;
+      return records.length < maxRecordsPerQuery ? undefined : processRecords();
     }
 
-    await connection.end();
-
     async function getRecords() {
-      if (cursor) {
-        const results = await connection.query('SELECT * FROM records WHERE id > ? ORDER BY id ASC LIMIT 1000', [cursor]);
-        return format(results);
-      }
+      const results = await connection.query('SELECT * FROM records ORDER BY id ASC LIMIT ?', [maxRecordsPerQuery]);
+      return results.map(formatRecord);
 
-      const results = await connection.query('SELECT * FROM records ORDER BY id ASC LIMIT 1000');
-      return format(results);
-
-      function format(results) {
-        if (results.length < 1000) {
-          return {
-            records: results.map(formatRecord)
-          };
-        }
-
+      function formatRecord({id, record}) {
         return {
-          records: results.map(formatRecord),
-          newCursor: results.slice(-1)[0].id
+          id,
+          record: new MarcRecord(record, {fields: false, subfields: false, subfieldValues: false})
         };
-
-        function formatRecord({id, record}) {
-          return {
-            id,
-            record: new MarcRecord(record, {fields: false, subfields: false, subfieldValues: false})
-          };
-        }
       }
     }
 
